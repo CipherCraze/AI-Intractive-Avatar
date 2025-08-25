@@ -1,5 +1,6 @@
 import AnimationLayer from './AnimationLayer'
 import InteractiveVisualization from './InteractiveVisualization'
+import PexelsBackground from './PexelsBackground'
 import { useChatStore } from '../store/useChatStore'
 import { motion } from 'framer-motion'
 import Loader from './Loader'
@@ -14,11 +15,14 @@ export default function AvatarStage() {
 		slides, 
 		isAvatarSpeaking, 
 		setAvatarSpeaking, 
-		setAnimationEvent 
+		setAnimationEvent,
+		backgroundSettings,
+		setBackgroundSettings
 	} = useChatStore()
 	
 	const videoRef = useRef<HTMLVideoElement>(null)
 	const [showInteractiveMode, setShowInteractiveMode] = useState(false)
+	const [showBackgroundSettings, setShowBackgroundSettings] = useState(false)
 	
 	// Track video playback to sync with animations
 	useEffect(() => {
@@ -62,6 +66,16 @@ export default function AvatarStage() {
 	
 	return (
 		<div className="relative w-full h-[28rem] bg-black rounded-xl overflow-hidden border border-white/10 shadow-2xl">
+			{/* Pexels Background Layer */}
+			{backgroundSettings.usePexelsBackground && avatar.concept && (
+				<PexelsBackground
+					concept={avatar.concept}
+					isActive={!showInteractiveMode}
+					opacity={backgroundSettings.backgroundOpacity}
+					className="z-0"
+				/>
+			)}
+			
 			{/* Enhanced Animation Layer with interactivity */}
 			<AnimationLayer 
 				concept={avatar.concept} 
@@ -95,7 +109,7 @@ export default function AvatarStage() {
 					animate={{ opacity: 1 }}
 					style={{
 						// Blend mode for better integration with background animations
-						mixBlendMode: avatar.concept ? 'screen' : 'normal'
+						mixBlendMode: backgroundSettings.usePexelsBackground ? 'overlay' : (avatar.concept ? 'screen' : 'normal')
 					}}
 				/>
 			)}
@@ -112,6 +126,82 @@ export default function AvatarStage() {
 						</div>
 					)}
 				</div>
+			)}
+			
+			{/* Background Settings Toggle */}
+			<motion.button
+				onClick={() => setShowBackgroundSettings(!showBackgroundSettings)}
+				className="absolute top-4 left-4 bg-black/50 hover:bg-black/70 backdrop-blur-sm rounded-full p-2 text-white text-sm z-30 transition-all"
+				whileHover={{ scale: 1.05 }}
+				whileTap={{ scale: 0.95 }}
+				title="Background Settings"
+			>
+				🎨
+			</motion.button>
+
+			{/* Background Settings Panel */}
+			{showBackgroundSettings && (
+				<motion.div
+					initial={{ opacity: 0, y: -10 }}
+					animate={{ opacity: 1, y: 0 }}
+					exit={{ opacity: 0, y: -10 }}
+					className="absolute top-16 left-4 bg-black/80 backdrop-blur-md rounded-lg p-4 text-white text-sm z-30 min-w-[200px]"
+				>
+					<h3 className="font-medium mb-3">Background Settings</h3>
+					
+					{/* Toggle Pexels Background */}
+					<div className="flex items-center justify-between mb-3">
+						<span>Pexels Background</span>
+						<button
+							onClick={() => setBackgroundSettings({ 
+								usePexelsBackground: !backgroundSettings.usePexelsBackground 
+							})}
+							className={`w-10 h-6 rounded-full ${
+								backgroundSettings.usePexelsBackground ? 'bg-blue-500' : 'bg-gray-600'
+							} relative transition-colors`}
+						>
+							<div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-transform ${
+								backgroundSettings.usePexelsBackground ? 'translate-x-5' : 'translate-x-1'
+							}`} />
+						</button>
+					</div>
+
+					{/* Opacity Slider */}
+					{backgroundSettings.usePexelsBackground && (
+						<div className="mb-3">
+							<label className="block mb-2">Opacity: {Math.round(backgroundSettings.backgroundOpacity * 100)}%</label>
+							<input
+								type="range"
+								min="0.1"
+								max="1"
+								step="0.1"
+								value={backgroundSettings.backgroundOpacity}
+								onChange={(e) => setBackgroundSettings({ 
+									backgroundOpacity: parseFloat(e.target.value) 
+								})}
+								className="w-full"
+							/>
+						</div>
+					)}
+
+					{/* Background Type */}
+					{backgroundSettings.usePexelsBackground && (
+						<div>
+							<label className="block mb-2">Content Type:</label>
+							<select
+								value={backgroundSettings.backgroundType}
+								onChange={(e) => setBackgroundSettings({ 
+									backgroundType: e.target.value as 'photos' | 'videos' | 'auto' 
+								})}
+								className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1"
+							>
+								<option value="auto">Auto</option>
+								<option value="photos">Photos</option>
+								<option value="videos">Videos</option>
+							</select>
+						</div>
+					)}
+				</motion.div>
 			)}
 			
 			{/* Interactive Mode Toggle */}

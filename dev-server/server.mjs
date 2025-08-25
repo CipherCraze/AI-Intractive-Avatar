@@ -26,7 +26,13 @@ console.log('[dev-server] Express app configured')
 const hasGemini = !!process.env.GEMINI_API_KEY
 const hasHeygen = !!process.env.HEYGEN_API_KEY && !!process.env.HEYGEN_AVATAR_ID
 const genAI = hasGemini ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null
-const model = hasGemini ? genAI.getGenerativeModel({ model: 'gemini-1.5-pro' }) : null
+const model = hasGemini ? genAI.getGenerativeModel({ model: 'gemini-1.5-flash' }) : null // Using flash instead of pro
+
+// Rate limiting
+let lastRequestTime = 0
+const MIN_REQUEST_INTERVAL = 4000 // 4 seconds between requests (15 per minute max)
+let dailyRequestCount = 0
+const MAX_DAILY_REQUESTS = 1400 // Leave some buffer
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -46,46 +52,86 @@ app.get('/api/health', (req, res) => {
 
 function buildMock(question) {
   const concept = (question || 'General').split(/\s+/).slice(0, 2).join(' ') || 'General'
-  const lowerQ = question.toLowerCase()
-  
-  // Smart subject detection
-  let subject = 'General'
-  if (lowerQ.includes('photosynthesis') || lowerQ.includes('biology') || lowerQ.includes('cell') || lowerQ.includes('dna')) {
-    subject = 'Biology'
-  } else if (lowerQ.includes('physics') || lowerQ.includes('gravity') || lowerQ.includes('wave') || lowerQ.includes('force')) {
-    subject = 'Physics'
-  } else if (lowerQ.includes('math') || lowerQ.includes('algebra') || lowerQ.includes('geometry') || lowerQ.includes('coordinate')) {
-    subject = 'Mathematics'
-  } else if (lowerQ.includes('chemistry') || lowerQ.includes('atom') || lowerQ.includes('molecule')) {
-    subject = 'Chemistry'
-  } else if (lowerQ.includes('programming') || lowerQ.includes('algorithm') || lowerQ.includes('computer')) {
-    subject = 'Computer Science'
-  }
-  
-  // Smart difficulty detection
-  let difficulty = 'beginner'
-  if (lowerQ.includes('advanced') || lowerQ.includes('complex') || lowerQ.includes('derive')) {
-    difficulty = 'advanced'
-  } else if (lowerQ.includes('analyze') || lowerQ.includes('compare') || lowerQ.includes('how does')) {
-    difficulty = 'intermediate'
-  }
-  
   return {
-    answer: `Here is a comprehensive explanation of ${concept}. This is a mock response because API keys are not configured. The system would normally provide detailed, engaging explanations with real-world examples and step-by-step breakdowns to help you understand this ${subject.toLowerCase()} concept.`,
+    answer: `Here is a comprehensive explanation of ${concept}. This is a mock response because API limits have been reached or API keys are not configured properly.`,
     concept,
+    difficulty: 'beginner',
+    subject: 'General',
     slides: [
       `Overview of ${concept}`,
       'Key steps or components',
-      'Real-world examples',
-      'Common applications',
-      'Why it matters',
-      'Quick recap and next steps'
+      'Real-world examples and applications',
+      'Common challenges and solutions',
+      'Quick recap and summary'
     ],
-    difficulty,
-    subject,
-    interactiveElements: ['concept-visualization', 'step-by-step-guide'],
+    interactiveElements: ['animation', 'visualization'],
     videoUrl: null,
     jobId: null,
+  }
+}
+
+// Enhanced rate limiting function
+async function waitForRateLimit() {
+  const now = Date.now()
+  const timeSinceLastRequest = now - lastRequestTime
+  
+  if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
+    const waitTime = MIN_REQUEST_INTERVAL - timeSinceLastRequest
+    console.log(`[rate-limit] Waiting ${waitTime}ms before next request`)
+    await sleep(waitTime)
+  }
+  
+  lastRequestTime = Date.now()
+}
+
+// Check daily quota
+function checkDailyQuota() {
+  if (dailyRequestCount >= MAX_DAILY_REQUESTS) {
+    console.log(`[quota] Daily request limit reached: ${dailyRequestCount}/${MAX_DAILY_REQUESTS}`)
+    return false
+  }
+  return true
+}
+
+// Enhanced Gemini request with retries
+async function callGeminiWithRetry(prompt, maxRetries = 3) {
+  if (!hasGemini || !model) {
+    throw new Error('Gemini API not configured')
+  }
+  
+  if (!checkDailyQuota()) {
+    throw new Error('Daily quota exceeded')
+  }
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      await waitForRateLimit()
+      
+      console.log(`[gemini] Attempt ${attempt}/${maxRetries} - Making request...`)
+      const result = await model.generateContent(prompt)
+      
+      dailyRequestCount++
+      console.log(`[gemini] Success! Daily count: ${dailyRequestCount}/${MAX_DAILY_REQUESTS}`)
+      
+      return result.response.text().trim()
+    } catch (error) {
+      console.log(`[gemini] Attempt ${attempt} failed:`, error.message)
+      
+      if (error.message.includes('429') || error.message.includes('quota')) {
+        const retryDelay = Math.min(5000 * Math.pow(2, attempt - 1), 60000) // Exponential backoff, max 60s
+        console.log(`[rate-limit] Rate limit hit, waiting ${retryDelay}ms before retry`)
+        
+        if (attempt < maxRetries) {
+          await sleep(retryDelay)
+          continue
+        } else {
+          throw new Error('Rate limit exceeded - please try again later')
+        }
+      } else {
+        // Non-rate-limit error, don't retry
+        throw error
+      }
+    }
   }
 }
 
@@ -137,8 +183,8 @@ EXAMPLE:
 
 QUESTION: ${question}`
 
-    const result = await model.generateContent(prompt)
-    const text = result.response.text().trim()
+    const result = await callGeminiWithRetry(prompt)
+    const text = result
 
     let parsed = {}
     try { 
@@ -225,7 +271,16 @@ QUESTION: ${question}`
     })
   } catch (err) {
     console.error('[api/ask] error', err?.response?.data || err?.message || err)
-    // On error, return a mock so frontend keeps flowing
+    
+    // Handle rate limiting errors specifically
+    if (err.message && (err.message.includes('Rate limit') || err.message.includes('quota'))) {
+      return res.status(429).json({ 
+        error: 'AI service is temporarily rate limited. Please try again in a few minutes.',
+        retryAfter: 60
+      })
+    }
+    
+    // On other errors, return a mock so frontend keeps working
     return res.status(200).json(buildMock(question))
   }
 })
@@ -297,11 +352,11 @@ function generateDefaultSlides(concept) {
 function getSmartBackground(subject, concept) {
   // Smart background selection based on educational content
   const backgroundMap = {
-    'Biology': { type: 'gradient', colors: ['#2d5016', '#5cb85c'] },
-    'Physics': { type: 'gradient', colors: ['#1a1a2e', '#16213e'] },
-    'Chemistry': { type: 'gradient', colors: ['#4a1a4a', '#8e44ad'] },
-    'Mathematics': { type: 'gradient', colors: ['#2c3e50', '#3498db'] },
-    'Computer Science': { type: 'gradient', colors: ['#1a1a1a', '#34495e'] }
+    'Biology': { type: 'color', value: '#2d5016' },
+    'Physics': { type: 'color', value: '#1a1a2e' },
+    'Chemistry': { type: 'color', value: '#4a1a4a' },
+    'Mathematics': { type: 'color', value: '#2c3e50' },
+    'Computer Science': { type: 'color', value: '#1a1a1a' }
   }
   
   return backgroundMap[subject] || { type: 'transparent' }
@@ -319,6 +374,72 @@ app.get('/api/video-status', async (req, res) => {
   } catch (err) {
     console.error(err?.response?.data || err?.message || err)
     return res.status(500).json({ error: 'Failed to fetch status' })
+  }
+})
+
+app.get('/api/pexels', async (req, res) => {
+  try {
+    const { query, type = 'photos', per_page = 5 } = req.query
+    
+    if (!query || typeof query !== 'string') {
+      return res.status(400).json({ error: 'Missing query parameter' })
+    }
+    
+    const PEXELS_API_KEY = process.env.PEXELS_API_KEY
+    if (!PEXELS_API_KEY) {
+      return res.status(500).json({ error: 'Pexels API key not configured' })
+    }
+    
+    const endpoint = type === 'videos' 
+      ? `https://api.pexels.com/videos/search`
+      : `https://api.pexels.com/v1/search`
+    
+    const response = await axios.get(endpoint, {
+      headers: {
+        'Authorization': PEXELS_API_KEY
+      },
+      params: {
+        query: query,
+        per_page: per_page,
+        orientation: 'landscape'
+      }
+    })
+    
+    // Transform the response to include only needed data
+    const content = type === 'videos' 
+      ? response.data.videos?.map((video) => ({
+          id: video.id,
+          url: video.video_files?.[0]?.link,
+          image: video.image,
+          duration: video.duration,
+          width: video.width,
+          height: video.height
+        }))
+      : response.data.photos?.map((photo) => ({
+          id: photo.id,
+          url: photo.src?.large,
+          original: photo.src?.original,
+          medium: photo.src?.medium,
+          small: photo.src?.small,
+          alt: photo.alt,
+          width: photo.width,
+          height: photo.height
+        }))
+    
+    return res.status(200).json({
+      success: true,
+      type,
+      query,
+      content: content || [],
+      total: content?.length || 0
+    })
+    
+  } catch (error) {
+    console.error('Pexels API error:', error?.response?.data || error.message)
+    return res.status(500).json({ 
+      error: 'Failed to fetch content from Pexels',
+      details: error?.response?.status === 429 ? 'Rate limit exceeded' : 'Unknown error'
+    })
   }
 })
 

@@ -51,14 +51,21 @@ export async function ask(question: string, backgroundPreference: 'transparent' 
 		}
 	}
 
-	return { 
-		answer, 
-		concept, 
-		slides, 
-		videoUrl, 
-		jobId, 
-		difficulty, 
-		subject, 
-		interactiveElements 
+	return { answer, concept, slides, videoUrl, jobId, difficulty, subject, interactiveElements }
+}
+
+export async function fetchPexelsContent(query: string, type: 'photos' | 'videos' = 'photos', perPage: number = 5) {
+	try {
+		const response = await axios.get('/api/pexels', {
+			params: {
+				query,
+				type,
+				per_page: perPage
+			}
+		})
+		return response.data
+	} catch (error) {
+		console.error('Failed to fetch Pexels content:', error)
+		return { success: false, content: [], total: 0 }
 	}
 }
