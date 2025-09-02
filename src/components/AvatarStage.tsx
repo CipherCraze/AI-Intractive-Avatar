@@ -1,6 +1,9 @@
 import AnimationLayer from './AnimationLayer'
 import InteractiveVisualization from './InteractiveVisualization'
 import PexelsBackground from './PexelsBackground'
+import DynamicBackground from './DynamicBackground'
+import ErrorBoundary from './ErrorBoundary'
+import SimpleSlidesDeck from './SimpleSlidesDeck'
 import { useChatStore } from '../store/useChatStore'
 import { motion } from 'framer-motion'
 import Loader from './Loader'
@@ -66,6 +69,16 @@ export default function AvatarStage() {
 	
 	return (
 		<div className="relative w-full h-[28rem] bg-black rounded-xl overflow-hidden border border-white/10 shadow-2xl">
+			{/* Dynamic SDXL Background Layer */}
+			{backgroundSettings.useDynamicBackground && avatar.concept && avatar.subject && (
+				<DynamicBackground
+					concept={avatar.concept}
+					subject={avatar.subject}
+					isActive={!showInteractiveMode && isAvatarSpeaking}
+					style="subtle"
+				/>
+			)}
+			
 			{/* Pexels Background Layer */}
 			{backgroundSettings.usePexelsBackground && avatar.concept && (
 				<PexelsBackground
@@ -93,7 +106,9 @@ export default function AvatarStage() {
 			)}
 			
 			{/* Slides Components */}
-			<SlidesDeck title={avatar.concept || 'Key Concepts'} bullets={slides} />
+			<ErrorBoundary fallback={<SimpleSlidesDeck title={avatar.concept || 'Key Concepts'} bullets={slides} />}>
+				<SlidesDeck title={avatar.concept || 'Key Concepts'} bullets={slides} />
+			</ErrorBoundary>
 			<SlidesPanel slides={slides} />
 			
 			{/* Avatar Video */}
@@ -148,6 +163,23 @@ export default function AvatarStage() {
 					className="absolute top-16 left-4 bg-black/80 backdrop-blur-md rounded-lg p-4 text-white text-sm z-30 min-w-[200px]"
 				>
 					<h3 className="font-medium mb-3">Background Settings</h3>
+					
+					{/* Toggle Dynamic Background */}
+					<div className="flex items-center justify-between mb-3">
+						<span>AI Generated Background</span>
+						<button
+							onClick={() => setBackgroundSettings({ 
+								useDynamicBackground: !backgroundSettings.useDynamicBackground 
+							})}
+							className={`w-10 h-6 rounded-full ${
+								backgroundSettings.useDynamicBackground ? 'bg-green-500' : 'bg-gray-600'
+							} relative transition-colors`}
+						>
+							<div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-transform ${
+								backgroundSettings.useDynamicBackground ? 'translate-x-5' : 'translate-x-1'
+							}`} />
+						</button>
+					</div>
 					
 					{/* Toggle Pexels Background */}
 					<div className="flex items-center justify-between mb-3">

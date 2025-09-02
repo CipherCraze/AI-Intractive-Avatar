@@ -7,12 +7,15 @@ import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import axios from 'axios'
 import { GoogleGenerativeAI } from '@google/generative-ai'
+import fs from 'fs'
+import path from 'path'
+import crypto from 'crypto'
 
 console.log('[dev-server] Imports loaded successfully')
 
 // Load environment variables from .env.local
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = dirname(__filename)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 dotenv.config({ path: join(__dirname, '..', '.env.local') })
 
 console.log('[dev-server] Environment loaded')
@@ -23,10 +26,38 @@ app.use(express.json())
 
 console.log('[dev-server] Express app configured')
 
-const hasGemini = !!process.env.GEMINI_API_KEY
-const hasHeygen = !!process.env.HEYGEN_API_KEY && !!process.env.HEYGEN_AVATAR_ID
-const genAI = hasGemini ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null
-const model = hasGemini ? genAI.getGenerativeModel({ model: 'gemini-1.5-flash' }) : null // Using flash instead of pro
+// Clean and validate environment variables
+const GEMINI_KEY = (process.env.GEMINI_API_KEY || '').trim().replace(/['"]/g, '')
+const HEYGEN_KEY = (process.env.HEYGEN_API_KEY || '').trim().replace(/['"]/g, '')
+const HEYGEN_AVATAR = (process.env.HEYGEN_AVATAR_ID || '').trim().replace(/['"]/g, '')
+const HEYGEN_VOICE = (process.env.HEYGEN_VOICE_ID || 'en-US').trim().replace(/['"]/g, '')
+const HF_TOKEN = (process.env.HF_API_TOKEN || '').trim().replace(/['"]/g, '')
+
+const hasGemini = GEMINI_KEY.length > 10
+const hasHeygen = HEYGEN_KEY.length > 10 && HEYGEN_AVATAR.length > 10
+const hasHuggingFace = HF_TOKEN.length > 10
+
+console.log('[debug] GEMINI_API_KEY:', hasGemini ? 'Set ✓' : 'Missing ✗')
+console.log('[debug] HEYGEN_API_KEY:', hasHeygen ? 'Set ✓' : 'Missing ✗')
+console.log('[debug] HEYGEN_AVATAR_ID:', HEYGEN_AVATAR ? 'Set ✓' : 'Missing ✗')
+console.log('[debug] HF_API_TOKEN:', hasHuggingFace ? 'Set ✓' : 'Missing ✗')
+
+const genAI = hasGemini ? new GoogleGenerativeAI(GEMINI_KEY) : null
+const model = hasGemini ? genAI.getGenerativeModel({ model: 'gemini-1.5-flash' }) : null
+
+// SDXL Image Generation Setup
+const GENERATED_DIR = path.join(process.cwd(), 'dev-server', 'generated')
+if (!fs.existsSync(GENERATED_DIR)) {
+  fs.mkdirSync(GENERATED_DIR, { recursive: true })
+  console.log('[sdxl] Created generated assets directory:', GENERATED_DIR)
+}
+
+const IMAGE_CACHE = new Map() // key -> { path, expiresAt, prompt }
+const CACHE_TTL_MS = 1000 * 60 * 60 * 24 // 24 hours cache
+
+function cacheKeyFor(prompt, opts = {}) {
+  return crypto.createHash('sha256').update(JSON.stringify({ prompt, ...opts })).digest('hex')
+}
 
 // Rate limiting
 let lastRequestTime = 0
@@ -45,6 +76,7 @@ app.get('/api/health', (req, res) => {
 		env: {
 			hasGemini,
 			hasHeygen,
+			hasHuggingFace,
 			nodeVersion: process.version
 		}
 	})
@@ -52,18 +84,54 @@ app.get('/api/health', (req, res) => {
 
 function buildMock(question) {
   const concept = (question || 'General').split(/\s+/).slice(0, 2).join(' ') || 'General'
-  return {
-    answer: `Here is a comprehensive explanation of ${concept}. This is a mock response because API limits have been reached or API keys are not configured properly.`,
-    concept,
-    difficulty: 'beginner',
+  
+  // Create more realistic educational content based on the question
+  const mockContent = {
+    'photosynthesis': {
+      answer: `Photosynthesis is the process where plants convert sunlight into energy. Plants use chlorophyll in their leaves to capture light energy, combine carbon dioxide from the air with water from their roots, and create glucose (sugar) while releasing oxygen as a byproduct. This process is essential for all life on Earth as it produces the oxygen we breathe and forms the base of the food chain.`,
+      subject: 'Biology',
+      difficulty: 'beginner',
+      slides: [
+        'Plants capture sunlight using chlorophyll',
+        'Carbon dioxide enters through leaf pores',
+        'Water travels up from roots to leaves', 
+        'Glucose is produced as plant food',
+        'Oxygen is released as a byproduct'
+      ]
+    },
+    'gravity': {
+      answer: `Gravity is a fundamental force of nature that attracts objects with mass toward each other. The more massive an object, the stronger its gravitational pull. On Earth, gravity gives weight to objects and causes them to fall toward the ground when dropped. This force keeps planets in orbit around the sun and is responsible for many phenomena we observe in our daily lives.`,
+      subject: 'Physics',
+      difficulty: 'beginner',
+      slides: [
+        'Gravity attracts objects with mass',
+        'Larger masses have stronger gravity',
+        'Earth\'s gravity pulls objects downward',
+        'Gravity keeps planets in orbit',
+        'Weight is the effect of gravity on mass'
+      ]
+    }
+  }
+  
+  const key = concept.toLowerCase()
+  const mock = mockContent[key] || {
+    answer: `Here is an educational explanation of ${concept}. This content demonstrates the app's capabilities when API keys are properly configured.`,
     subject: 'General',
+    difficulty: 'beginner',
     slides: [
-      `Overview of ${concept}`,
-      'Key steps or components',
-      'Real-world examples and applications',
-      'Common challenges and solutions',
-      'Quick recap and summary'
-    ],
+      `Introduction to ${concept}`,
+      'Key concepts and principles',
+      'Practical applications',
+      'Summary and review'
+    ]
+  }
+  
+  return {
+    answer: mock.answer,
+    concept,
+    difficulty: mock.difficulty,
+    subject: mock.subject,
+    slides: mock.slides,
     interactiveElements: ['animation', 'visualization'],
     videoUrl: null,
     jobId: null,
@@ -135,18 +203,91 @@ async function callGeminiWithRetry(prompt, maxRetries = 3) {
   }
 }
 
+// SDXL Image Generation Functions
+async function fetchHFImage(prompt, model = 'stabilityai/stable-diffusion-xl-base-1.0', options = {}) {
+  const key = cacheKeyFor(prompt, { model, ...options })
+  const cached = IMAGE_CACHE.get(key)
+  
+  // Check cache first
+  if (cached && cached.expiresAt > Date.now() && fs.existsSync(cached.path)) {
+    console.log('[sdxl] Using cached image for:', prompt.slice(0, 50) + '...')
+    return { cached: true, filePath: cached.path, url: `/generated/${path.basename(cached.path)}` }
+  }
+
+  if (!hasHuggingFace) {
+    throw new Error('HuggingFace API token not configured')
+  }
+
+  console.log('[sdxl] Generating image for:', prompt.slice(0, 50) + '...')
+  
+  const res = await axios({
+    method: 'POST',
+    url: `https://api-inference.huggingface.co/models/${model}`,
+    headers: {
+      'Authorization': `Bearer ${HF_TOKEN}`,
+      'Content-Type': 'application/json'
+    },
+    data: {
+      inputs: prompt,
+      parameters: { 
+        guidance_scale: options.guidance || 7.5, 
+        width: options.width || 1024, 
+        height: options.height || 1024,
+        num_inference_steps: options.steps || 20
+      }
+    },
+    responseType: 'arraybuffer',
+    timeout: 60000 // 60 seconds for image generation
+  })
+
+  if (res.status !== 200) {
+    throw new Error(`HF image generation failed: ${res.status}`)
+  }
+
+  const fileName = `${key}.png`
+  const filePath = path.join(GENERATED_DIR, fileName)
+  fs.writeFileSync(filePath, res.data)
+
+  const cacheEntry = { 
+    path: filePath, 
+    expiresAt: Date.now() + CACHE_TTL_MS,
+    prompt: prompt.slice(0, 100)
+  }
+  IMAGE_CACHE.set(key, cacheEntry)
+  
+  console.log('[sdxl] Image generated and cached:', fileName)
+  return { cached: false, filePath, url: `/generated/${fileName}` }
+}
+
+function generateEducationalPrompt(concept, subject) {
+  const basePrompts = {
+    'Biology': `detailed scientific diagram of ${concept}, labeled parts, clean educational illustration, high contrast, biology textbook style`,
+    'Physics': `physics diagram showing ${concept}, mathematical formulas, vectors, clean scientific illustration, educational poster style`,
+    'Chemistry': `chemistry diagram of ${concept}, molecular structures, chemical equations, laboratory style, educational illustration`,
+    'Mathematics': `mathematical visualization of ${concept}, geometric shapes, coordinate grids, clean diagram, educational math textbook style`,
+    'Computer Science': `technical diagram illustrating ${concept}, flowcharts, data structures, clean modern design, programming concept visualization`,
+    'General': `educational illustration of ${concept}, clean diagram, informative design, suitable for learning`
+  }
+  
+  return basePrompts[subject] || basePrompts['General']
+}
+
 app.post('/api/ask', async (req, res) => {
   const { question, backgroundPreference } = req.body || {}
   if (!question) return res.status(400).json({ error: 'Missing question' })
 
-  // If keys missing, return mock so frontend can function
-  if (!hasGemini || !hasHeygen) {
-    return res.status(200).json(buildMock(question))
-  }
-
   try {
-    // Enhanced prompt for better educational content generation
-    const prompt = `You are an expert educational AI tutor. Your role is to explain complex topics in an engaging, clear way for students.
+    let answer = ''
+    let concept = ''
+    let slides = []
+    let difficulty = 'beginner'
+    let subject = 'General'
+    let interactiveElements = []
+
+    // Try Gemini API if available
+    if (hasGemini) {
+      try {
+        const prompt = `You are an expert educational AI tutor. Your role is to explain complex topics in an engaging, clear way for students.
 
 INSTRUCTIONS:
 1. Analyze the question to identify the main educational concept
@@ -162,101 +303,106 @@ REQUIRED JSON FORMAT:
   "slides": ["Key point 1", "Key point 2", "Key point 3", "Key point 4", "Key point 5"],
   "difficulty": "beginner|intermediate|advanced",
   "subject": "Biology|Physics|Chemistry|Mathematics|Computer Science|General",
-  "interactiveElements": ["element1", "element2"] // Optional interactive features to highlight
-}
-
-EXAMPLE:
-{
-  "answer": "Photosynthesis is the amazing process where plants convert sunlight into energy! Think of plants as solar panels that can make their own food. During photosynthesis, plants take in carbon dioxide from the air and water from their roots. Using chlorophyll (the green pigment in leaves), they capture sunlight energy to combine these ingredients into glucose (sugar) and release oxygen as a bonus. This process is crucial for all life on Earth because it produces the oxygen we breathe and forms the base of most food chains.",
-  "concept": "Photosynthesis",
-  "slides": [
-    "Plants capture sunlight using chlorophyll",
-    "Carbon dioxide enters through leaf pores",
-    "Water travels up from roots to leaves",
-    "Glucose (sugar) is produced as plant food",
-    "Oxygen is released as a byproduct"
-  ],
-  "difficulty": "beginner",
-  "subject": "Biology",
-  "interactiveElements": ["light-absorption", "molecular-flow"]
+  "interactiveElements": ["element1", "element2"]
 }
 
 QUESTION: ${question}`
 
-    const result = await callGeminiWithRetry(prompt)
-    const text = result
+        console.log('[api/ask] Calling Gemini API...')
+        const result = await callGeminiWithRetry(prompt)
+        const text = result
 
-    let parsed = {}
-    try { 
-      // Clean the response to ensure it's valid JSON
-      const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
-      parsed = JSON.parse(cleanText) 
-    } catch (parseError) { 
-      console.log('Failed to parse Gemini response:', text)
-      // Fallback parsing - try to extract key information
-      parsed = extractInfoFromText(text, question)
-    }
-
-    // Validate and sanitize the response
-    const answer = (parsed.answer || 'Let me think about that topic.').slice(0, 2000)
-    const concept = (parsed.concept || extractConceptFromQuestion(question)).slice(0, 64)
-    const difficulty = parsed.difficulty || 'beginner'
-    const subject = parsed.subject || 'General'
-    const interactiveElements = Array.isArray(parsed.interactiveElements) ? parsed.interactiveElements : []
-    
-    const slides = Array.isArray(parsed.slides) && parsed.slides.length ? 
-      parsed.slides.slice(0, 6) : 
-      generateDefaultSlides(concept)
-
-    console.log(`[Gemini] Generated content for: ${concept} (${subject}, ${difficulty} level)`)
-
-    // Enhanced background selection based on subject and content
-    const bgPref = backgroundPreference || 'auto'
-    let background = { type: 'transparent' }
-    
-    if (bgPref === 'green') {
-      background = { type: 'color', value: '#00FF00' }
-    } else if (bgPref === 'auto') {
-      // Smart background selection based on subject
-      background = getSmartBackground(subject, concept)
-    }
-
-    const startRes = await axios.post(
-      'https://api.heygen.com/v2/video/generate',
-      {
-        video_inputs: [
-          {
-            character: { type: 'avatar', avatar_id: process.env.HEYGEN_AVATAR_ID, avatar_style: 'normal' },
-            voice: { type: 'text', input_text: answer, voice_id: process.env.HEYGEN_VOICE_ID || 'en-US' },
-            background,
-          },
-        ],
-        dimension: { width: 1280, height: 720 },
-      },
-      {
-        headers: { 'X-Api-Key': process.env.HEYGEN_API_KEY, 'Content-Type': 'application/json' },
-        timeout: 30000,
-      }
-    )
-
-    let videoUrl = startRes?.data?.data?.video_url || null
-    const jobId = startRes?.data?.data?.video_id || startRes?.data?.data?.task_id || null
-
-    if (!videoUrl && jobId) {
-      let attempt = 0
-      const maxAttempts = 12
-      while (attempt < maxAttempts) {
-        await sleep(Math.min(1000 * Math.pow(1.5, attempt), 8000))
-        attempt++
-        const poll = await axios.get(`https://api.heygen.com/v1/video.status?id=${jobId}`,
-          { headers: { 'X-Api-Key': process.env.HEYGEN_API_KEY }, timeout: 15000 })
-        const status = poll?.data?.data?.status
-        if (status === 'completed' || status === 'succeeded' || poll?.data?.data?.video_url) {
-          videoUrl = poll?.data?.data?.video_url || null
-          break
+        try { 
+          const cleanText = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
+          const parsed = JSON.parse(cleanText)
+          
+          answer = (parsed.answer || '').slice(0, 2000)
+          concept = (parsed.concept || extractConceptFromQuestion(question)).slice(0, 64)
+          difficulty = parsed.difficulty || 'beginner'
+          subject = parsed.subject || 'General'
+          interactiveElements = Array.isArray(parsed.interactiveElements) ? parsed.interactiveElements : []
+          slides = Array.isArray(parsed.slides) && parsed.slides.length ? 
+            parsed.slides.slice(0, 6) : 
+            generateDefaultSlides(concept)
+          
+          console.log(`[Gemini] Generated content for: ${concept} (${subject}, ${difficulty} level)`)
+        } catch (parseError) { 
+          console.log('[api/ask] Failed to parse Gemini response, using extracted content')
+          const mockData = buildMock(question)
+          answer = text.slice(0, 2000)
+          concept = mockData.concept
+          slides = mockData.slides
+          difficulty = mockData.difficulty
+          subject = mockData.subject
+          interactiveElements = mockData.interactiveElements
         }
-        if (status === 'failed' || status === 'error') throw new Error('HeyGen failed to render video')
+      } catch (geminiError) {
+        console.log('[api/ask] Gemini error, using mock:', geminiError.message)
+        const mockData = buildMock(question)
+        answer = mockData.answer
+        concept = mockData.concept
+        slides = mockData.slides
+        difficulty = mockData.difficulty
+        subject = mockData.subject
+        interactiveElements = mockData.interactiveElements
       }
+    } else {
+      console.log('[api/ask] Gemini not available, using mock response')
+      const mockData = buildMock(question)
+      answer = mockData.answer
+      concept = mockData.concept
+      slides = mockData.slides
+      difficulty = mockData.difficulty
+      subject = mockData.subject
+      interactiveElements = mockData.interactiveElements
+    }
+
+    // Try HeyGen API if available
+    let videoUrl = null
+    let jobId = null
+    
+    if (hasHeygen && answer) {
+      try {
+        console.log('[api/ask] Generating HeyGen video...')
+        
+        // Enhanced background selection based on subject and content
+        const bgPref = backgroundPreference || 'auto'
+        let background = { type: 'transparent' }
+        
+        if (bgPref === 'green') {
+          background = { type: 'color', value: '#00FF00' }
+        } else if (bgPref === 'auto') {
+          background = getSmartBackground(subject, concept)
+        }
+
+        const startRes = await axios.post(
+          'https://api.heygen.com/v2/video/generate',
+          {
+            video_inputs: [
+              {
+                character: { type: 'avatar', avatar_id: HEYGEN_AVATAR, avatar_style: 'normal' },
+                voice: { type: 'text', input_text: answer, voice_id: HEYGEN_VOICE },
+                background,
+              },
+            ],
+            dimension: { width: 1280, height: 720 },
+          },
+          {
+            headers: { 'X-Api-Key': HEYGEN_KEY, 'Content-Type': 'application/json' },
+            timeout: 30000,
+          }
+        )
+
+        videoUrl = startRes?.data?.data?.video_url || null
+        jobId = startRes?.data?.data?.video_id || startRes?.data?.data?.task_id || null
+
+        console.log('[api/ask] HeyGen video generation started:', { videoUrl, jobId })
+      } catch (heygenError) {
+        console.log('[api/ask] HeyGen error:', heygenError.message)
+        // Continue without video
+      }
+    } else {
+      console.log('[api/ask] HeyGen not available, skipping video generation')
     }
 
     return res.status(200).json({ 
@@ -368,7 +514,7 @@ app.get('/api/video-status', async (req, res) => {
     if (!id) return res.status(400).json({ error: 'Missing id' })
     const poll = await axios.get(
       `https://api.heygen.com/v1/video.status?id=${encodeURIComponent(String(id))}`,
-      { headers: { 'X-Api-Key': process.env.HEYGEN_API_KEY }, timeout: 15000 }
+      { headers: { 'X-Api-Key': HEYGEN_KEY }, timeout: 15000 }
     )
     return res.status(200).json(poll.data)
   } catch (err) {
@@ -376,6 +522,63 @@ app.get('/api/video-status', async (req, res) => {
     return res.status(500).json({ error: 'Failed to fetch status' })
   }
 })
+
+// SDXL Image Generation Endpoint
+app.post('/api/generate-background', async (req, res) => {
+  try {
+    const { concept, subject, style } = req.body || {}
+    if (!concept) {
+      return res.status(400).json({ error: 'Concept is required' })
+    }
+
+    const prompt = generateEducationalPrompt(concept, subject || 'General')
+    console.log('[api/generate-background] Generating for:', concept, '->', prompt.slice(0, 80) + '...')
+
+    try {
+      const result = await fetchHFImage(prompt, 'stabilityai/stable-diffusion-xl-base-1.0', {
+        width: 1280,
+        height: 720,
+        guidance: 7.5
+      })
+
+      return res.json({
+        success: true,
+        url: result.url,
+        cached: result.cached,
+        concept,
+        prompt: prompt.slice(0, 100) + '...'
+      })
+    } catch (hfError) {
+      console.log('[api/generate-background] HF error:', hfError.message)
+      
+      // Fallback to a simple colored background based on subject
+      const fallbackColors = {
+        'Biology': '#2d5016',
+        'Physics': '#1a1a2e', 
+        'Chemistry': '#4a1a4a',
+        'Mathematics': '#2c3e50',
+        'Computer Science': '#1a1a1a'
+      }
+      
+      return res.json({
+        success: false,
+        fallback: true,
+        color: fallbackColors[subject] || '#2c3e50',
+        error: hfError.message.includes('token') ? 'HuggingFace API token required' : 'Image generation temporarily unavailable',
+        concept
+      })
+    }
+  } catch (error) {
+    console.error('[api/generate-background] Error:', error)
+    return res.status(500).json({ 
+      error: 'Failed to generate background',
+      details: error.message 
+    })
+  }
+})
+
+// Serve generated static files
+app.use('/generated', express.static(GENERATED_DIR))
 
 app.get('/api/pexels', async (req, res) => {
   try {
@@ -449,9 +652,11 @@ const PORT = process.env.PORT || 5000
 const server = app.listen(PORT, '127.0.0.1', () => {
 	console.log(`[dev-server] listening on http://127.0.0.1:${PORT}`)
 	console.log(`[dev-server] Environment check:`)
-	console.log(`  - GEMINI_API_KEY: ${hasGemini ? 'Set' : 'Missing'}`)
-	console.log(`  - HEYGEN_API_KEY: ${hasHeygen ? 'Set' : 'Missing'}`)
-	console.log(`  - HEYGEN_AVATAR_ID: ${process.env.HEYGEN_AVATAR_ID ? 'Set' : 'Missing'}`)
+	console.log(`  - GEMINI_API_KEY: ${hasGemini ? 'Set ✓' : 'Missing ✗'}`)
+	console.log(`  - HEYGEN_API_KEY: ${hasHeygen ? 'Set ✓' : 'Missing ✗'}`)
+	console.log(`  - HEYGEN_AVATAR_ID: ${HEYGEN_AVATAR ? 'Set ✓' : 'Missing ✗'}`)
+	console.log(`  - HF_API_TOKEN: ${hasHuggingFace ? 'Set ✓' : 'Missing ✗'}`)
+	console.log(`[dev-server] Ready to serve requests!`)
 })
 
 server.on('error', (err) => {

@@ -2,8 +2,37 @@ import type { VercelRequest, VercelResponse } from '@vercel/node'
 import axios from 'axios'
 import { GoogleGenerativeAI } from '@google/generative-ai'
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY as string)
-const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' })
+// Clean and validate environment variables
+const GEMINI_KEY = (process.env.GEMINI_API_KEY || '').trim().replace(/['"]/g, '')
+const HEYGEN_KEY = (process.env.HEYGEN_API_KEY || '').trim().replace(/['"]/g, '')
+const HEYGEN_AVATAR = (process.env.HEYGEN_AVATAR_ID || '').trim().replace(/['"]/g, '')
+const HEYGEN_VOICE = (process.env.HEYGEN_VOICE_ID || 'en-US').trim().replace(/['"]/g, '')
+
+const hasGemini = GEMINI_KEY.length > 10
+const hasHeygen = HEYGEN_KEY.length > 10 && HEYGEN_AVATAR.length > 10
+
+const genAI = hasGemini ? new GoogleGenerativeAI(GEMINI_KEY) : null
+const model = genAI ? genAI.getGenerativeModel({ model: 'gemini-1.5-flash' }) : null
+
+function buildMock(question: string) {
+  const concept = (question || 'General').split(/\s+/).slice(0, 2).join(' ') || 'General'
+  return {
+    answer: `Here is a comprehensive explanation of ${concept}. This is a mock response because API limits have been reached or API keys are not configured properly.`,
+    concept,
+    difficulty: 'beginner',
+    subject: 'General',
+    slides: [
+      `Overview of ${concept}`,
+      'Key steps or components',
+      'Real-world examples and applications',
+      'Common challenges and solutions',
+      'Quick recap and summary'
+    ],
+    interactiveElements: ['animation', 'visualization'],
+    videoUrl: null,
+    jobId: null,
+  }
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -73,7 +102,15 @@ function generateDefaultSlides(concept: string): string[] {
 
 function getSmartBackground(subject: string): { type: 'transparent' } | { type: 'color'; value: string } {
 	// Smart background selection based on educational content
-	return { type: 'transparent' }
+	const backgroundMap: Record<string, { type: 'color'; value: string }> = {
+		'Biology': { type: 'color', value: '#2d5016' },
+		'Physics': { type: 'color', value: '#1a1a2e' },
+		'Chemistry': { type: 'color', value: '#4a1a4a' },
+		'Mathematics': { type: 'color', value: '#2c3e50' },
+		'Computer Science': { type: 'color', value: '#1a1a1a' }
+	}
+	
+	return backgroundMap[subject] || { type: 'transparent' }
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -81,6 +118,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 		if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 		const { question, backgroundPreference } = req.body as { question?: string; backgroundPreference?: 'transparent' | 'green' | 'auto' }
 		if (!question) return res.status(400).json({ error: 'Missing question' })
+
+		// If keys missing, return mock so frontend can function
+		if (!hasGemini || !hasHeygen) {
+			console.log('[api/ask] Using mock response - missing API keys')
+			return res.status(200).json(buildMock(question))
+		}
+
+		if (!model) {
+			console.log('[api/ask] Using mock response - model not initialized')
+			return res.status(200).json(buildMock(question))
+		}
 
 		// Enhanced prompt for better educational content generation
 		const prompt = `You are an expert educational AI tutor. Your role is to explain complex topics in an engaging, clear way for students.
@@ -138,6 +186,7 @@ QUESTION: ${question}`
 			parsed = JSON.parse(cleanText)
 		} catch {
 			// Fallback parsing
+			console.log('Failed to parse Gemini response, using fallback')
 			parsed = extractInfoFromText(text, question)
 		}
 
@@ -151,6 +200,8 @@ QUESTION: ${question}`
 		const slides = Array.isArray(parsed.slides) && parsed.slides.length > 0
 			? parsed.slides.slice(0, 6)
 			: generateDefaultSlides(concept)
+
+		console.log(`[Gemini] Generated content for: ${concept} (${subject}, ${difficulty} level)`)
 
 		// Enhanced background selection based on subject and content
 		const bgPref = backgroundPreference || 'auto'
@@ -167,8 +218,8 @@ QUESTION: ${question}`
 			{
 				video_inputs: [
 					{
-						character: { type: 'avatar', avatar_id: process.env.HEYGEN_AVATAR_ID, avatar_style: 'normal' },
-						voice: { type: 'text', input_text: answer, voice_id: process.env.HEYGEN_VOICE_ID || 'en-US' },
+						character: { type: 'avatar', avatar_id: HEYGEN_AVATAR, avatar_style: 'normal' },
+						voice: { type: 'text', input_text: answer, voice_id: HEYGEN_VOICE },
 						background,
 					},
 				],
@@ -176,7 +227,7 @@ QUESTION: ${question}`
 			},
 			{
 				headers: {
-					'X-Api-Key': `${process.env.HEYGEN_API_KEY}`,
+					'X-Api-Key': HEYGEN_KEY,
 					'Content-Type': 'application/json',
 				},
 				timeout: 30000,
@@ -193,7 +244,7 @@ QUESTION: ${question}`
 				await sleep(Math.min(1000 * Math.pow(1.5, attempt), 8000))
 				attempt++
 				const poll = await axios.get(`https://api.heygen.com/v1/video.status?id=${jobId}`,
-					{ headers: { 'X-Api-Key': `${process.env.HEYGEN_API_KEY}` }, timeout: 15000 })
+					{ headers: { 'X-Api-Key': HEYGEN_KEY }, timeout: 15000 })
 				const status = poll?.data?.data?.status
 				if (status === 'completed' || status === 'succeeded' || poll?.data?.data?.video_url) {
 					videoUrl = poll?.data?.data?.video_url || null
@@ -214,7 +265,18 @@ QUESTION: ${question}`
 			interactiveElements 
 		})
 	} catch (err: any) {
-		console.error(err?.response?.data || err?.message || err)
-		return res.status(500).json({ error: 'Something went wrong' })
+		console.error('[api/ask] error', err?.response?.data || err?.message || err)
+		
+		// Handle rate limiting errors specifically
+		if (err.message && (err.message.includes('Rate limit') || err.message.includes('quota'))) {
+			return res.status(429).json({ 
+				error: 'AI service is temporarily rate limited. Please try again in a few minutes.',
+				retryAfter: 60
+			})
+		}
+		
+		// On other errors, return a mock so frontend keeps working
+		console.log('[api/ask] Returning mock due to error')
+		return res.status(200).json(buildMock(req.body?.question || 'General'))
 	}
 }

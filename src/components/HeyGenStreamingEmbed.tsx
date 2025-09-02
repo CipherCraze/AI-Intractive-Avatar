@@ -43,7 +43,9 @@ export default function HeyGenStreamingEmbed({ share, host = 'https://labs.heyge
 		iframe.allowFullscreen = false
 		iframe.title = 'Streaming Embed'
 		iframe.role = 'dialog'
-		iframe.allow = 'microphone'
+		iframe.allow = 'microphone; camera; autoplay; encrypted-media'
+		iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms')
+		iframe.style.pointerEvents = 'auto'
 		iframe.src = url
 
 		let visible = false

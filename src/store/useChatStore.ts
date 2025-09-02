@@ -19,6 +19,7 @@ type State = {
 	currentAnimationEvent: string | null
 	backgroundSettings: {
 		usePexelsBackground: boolean
+		useDynamicBackground: boolean
 		backgroundOpacity: number
 		backgroundType: 'photos' | 'videos' | 'auto'
 	}
@@ -41,6 +42,7 @@ export const useChatStore = create<State>((set) => ({
 	currentAnimationEvent: null,
 	backgroundSettings: {
 		usePexelsBackground: true,
+		useDynamicBackground: false,
 		backgroundOpacity: 0.6,
 		backgroundType: 'auto'
 	},
@@ -62,6 +64,7 @@ export const useChatStore = create<State>((set) => ({
 		currentAnimationEvent: null,
 		backgroundSettings: {
 			usePexelsBackground: true,
+			useDynamicBackground: false,
 			backgroundOpacity: 0.6,
 			backgroundType: 'auto'
 		}
