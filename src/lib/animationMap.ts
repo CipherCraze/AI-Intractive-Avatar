@@ -12,7 +12,6 @@ export const animationMap: Record<string, string> = {
 	'Electric Current': '/animations/electricity.json',
 	'Wave Motion': '/animations/waves.json',
 	Optics: '/animations/optics.json',
-	'Nuclear Physics': '/animations/nuclear.json',
 	
 	// Chemistry
 	'Chemical Bonding': '/animations/chemical-bonds.json',
